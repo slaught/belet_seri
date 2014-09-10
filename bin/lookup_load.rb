@@ -103,7 +103,7 @@ class Catalog < ActiveRecord::Base
         n = connection.quote_table_name(name)
         x("create schema #{n}")
     end
-    def self.mk_lookup_table(table_name, schema, value_col)
+    def self.mk_lookup_table(table_name, schema, value_col_name)
       x( %Q(create table "#{schema}"."#{table_name}" ) +
            %Q@("#{value_col}" text unique, description text )@
         )
@@ -176,8 +176,8 @@ class LookupTable < ActiveRecord::Base
     t = connection.quote_table_name(table_name)
     execute "INSERT INTO #{t} (#{c}) #{v}"
   end
-  def self.key_colums(key_list)
-      key_list.map{|col| connection.quote_column_names(col)}.join(',')
+  def self.key_columns(key_list)
+      key_list.map{|col| connection.quote_column_name(col)}.join(',')
   end
 end
 def schema_type(inData)
@@ -201,14 +201,22 @@ def lookup_type(inData)
     unless Catalog.entity_exists?(:table, table, schema) then 
         Catalog.mk_lookup_table(table, schema, value_col)
     end
+
     raw_data = inData[:values]
-    
+    raw_count = raw_data.length 
+
     LookupTable.table_name = "#{schema}.#{table}"
     cnt = LookupTable.count
     if cnt < 1 then
-      LookupTable.mass_insert([value_col],raw_data)
-      "Inserted #{LookupTable.count} rows of #{raw_data.length}"
-    elsif cnt == raw_data.length
+      case
+      when Hash then
+        LookupTable.mass_insert([value_col,'description'],
+            raw_data.map{|h| [h[:value], h[:description]]})
+      else
+        LookupTable.mass_insert([value_col],raw_data)
+      end
+      "Inserted #{LookupTable.count} rows of #{raw_count}"
+    elsif cnt == raw_count
       "The data looks correct"
     else
       "The data is not correct"
@@ -233,7 +241,7 @@ def main()
     when 'schema' then
       puts schema_type(inData)
     else
-      puts "Unsupported type #{dbojb_type}"
+      puts "Unsupported type #{dbobj_type}"
     end
 end
 main()
