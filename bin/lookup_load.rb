@@ -22,34 +22,13 @@ $DEBUG = false
 
 @args = Getopt::Declare.new(<<EOF)
          -c <connection_string>    connection string for access db  [required]
-         -i <input_file>           input file name [required]
+         <input_files>...          input file names [required]
          -debug                    enable debugging 
                                       { $DEBUG = true }
+         --debug                   [ditto]
 EOF
 
 DESKTOP ={:adapter => 'postgresql', :port=>5432, :database=>'iso'}
-
-@depends_query =<<-EOQ
-/* non-pinned objects*/
-select 
- d.deptype as deptype
-, d.objid as obj_oid
-, o.type as obj_type, o.schema as obj_schema, o.name as obj_name
-, o.identity as obj_identity
-, r.type as ref_type, r.schema as ref_schema, r.name as ref_name
-, r.identity as ref_identity
-, d.refobjid as ref_oid
-from pg_depend d
-, pg_identify_object(d.classid,d.objid,d.objsubid) o 
-, pg_identify_object(d.refclassid,d.refobjid,d.refobjsubid) r
-where 
-/* only do dependent, auto, and extension deptypes */
-deptype in ('n','a','e') /* ignore pinned & internal */
-and
-(o.schema is null or o.schema not in ('pg_catalog','information_schema'))
-and
-(r.schema is null or r.schema not in ('pg_catalog','information_schema'))
-EOQ
 
 module ActiveRecord
 
@@ -75,13 +54,10 @@ end
 
 FIND_SCHEMA = "select count(*) as n from information_schema.schemata where schema_name = ?"
 ["information_schema.schemata", "schema_name"]
-FIND_TABLE = "select count(*) as n from information_schema.tables where table_name = ? and table_schema = ?"
+FIND_TABLE  = "select count(*) as n from information_schema.tables where table_name = ? and table_schema = ?"
 ["information_schema.tables", 'table_name','table_schema']
-
-@find_table = <<EQ1
-select count(*) from informat
-
-EQ1
+FIND_DOMAIN = "select count(*) as n from information_schema.domains where domain_name = ? and domain_schema  = ? "
+["information_schema.domains", 'domain_name', 'domain_schema'] 
 
 class Catalog < ActiveRecord::Base
     def self.entity_exists?(data_type, name, qualifier)
@@ -90,23 +66,49 @@ class Catalog < ActiveRecord::Base
           x(sq([FIND_TABLE, name, qualifier]))
       when :schema
           x(sq([FIND_SCHEMA, name]))
+      when :domain
+          x(sq([FIND_DOMAIN, name, qualifier]))
       else
         raise Exception.new("Unsupported Type #{data_type}: (#{name},#{qualifier})")
       end
       rc.values.first.first.to_i > 0 #, rc['n'].inspect 
     end
-    def self.schema_comment(name, desc)
+    def self.sql_name(name, schema=nil)
         n = connection.quote_table_name(name)
-        x(sq(["comment on schema #{n} is ?", desc]))
+        if schema.nil? 
+          n
+        else
+          s = connection.quote_table_name(schema)
+          "#{s}.#{n}"
+        end
     end
+    def self.schema_comment(name, desc)
+        mkcomment(:schema, name, nil, desc)
+    end
+    def self.domain_comment(name, schema, desc)
+        mkcomment(:domain, name, schema, desc)
+    end
+    def self.table_comment(name, schema, desc)
+        mkcomment(:table , name, schema, desc)
+    end
+    def self.mkcomment(type, name, schema, desc)
+      n = sql_name(name, schema)
+      x(sq(["comment on #{type.to_s} #{n} is ?", desc]))
+    end
+
     def self.mkschema(name) 
         n = connection.quote_table_name(name)
         x("create schema #{n}")
     end
-    def self.mk_lookup_table(table_name, schema, value_col_name)
-      x( %Q(create table "#{schema}"."#{table_name}" ) +
-           %Q@("#{value_col}" text unique, description text )@
+    def self.mk_lookup_table(table_name, schema, value_col)
+      n = sql_name(table_name, schema)
+      x( %Q(create table #{n} ) +
+         %Q@("#{value_col}" text unique, description text )@
         )
+    end
+    def self.mkdomain(domain_name, schema, body)
+      n = sql_name(domain_name, schema)
+      x( "CREATE DOMAIN #{n} AS #{body}" )
     end
 end
 
@@ -139,11 +141,6 @@ class SpecialKey
   def hash()
     @id_str.hash
   end
-end
-
-def connect(connection_url)
-    access = PostgresAccess::Parse.new(connection_url)
-    ActiveRecord::Base.establish_connection(access.connect)
 end
 
 class LookupTable < ActiveRecord::Base
@@ -180,27 +177,70 @@ class LookupTable < ActiveRecord::Base
       key_list.map{|col| connection.quote_column_name(col)}.join(',')
   end
 end
-def schema_type(inData)
-    dbobj_type = inData[:type]
-    schema = inData[:schema]
-    desc = inData[:description]
+
+class DatabaseBuilder
+  attr :input_data
+  attr :dbobj_type
+
+  def initialize(inData)
+    @input_data = inData
+    @dbobj_type = inData[:type]
+  end
+  def build()
+    if supports_type?(@dbobj_type) then
+       send("#{@dbobj_type}_type".to_sym, @input_data)
+#    case @dbobj_type
+#    when 'lookup' then
+#      puts lookup_type(inData)
+#    when 'schema' then
+#      puts schema_type(inData)
+#    when 'domain' then
+#      puts domain_type(inData)
+    else
+      "Unsupported type #{@dbobj_type}"
+    end
+
+  end
+  def create_schema(schema) 
     unless  Catalog.entity_exists?(:schema,schema, nil) then
         Catalog.mkschema schema
     end
+  end
+  def domain_type(inData)
+    dbobj_type = inData[:type]
+    schema = inData[:schema]
+    domain = inData[:domain]
+    desc = inData[:description]
+    body = inData[:values] 
+    create_schema(schema) 
+    unless Catalog.entity_exists?(:domain, domain, schema) then 
+        Catalog.mkdomain(domain, schema, body)
+    end
+    Catalog.domain_comment(domain, schema, desc)
+    "Created Domain: #{domain}"
+  end
+  def schema_type(inData)
+    dbobj_type = inData[:type]
+    schema = inData[:schema]
+    desc = inData[:description]
+
+    create_schema(schema) 
     Catalog.schema_comment(schema, desc)
     "Created Schema: #{schema}"
-end
-def lookup_type(inData)
+  end
+  def lookup_type(inData)
     dbobj_type = inData[:type]
     schema = inData[:schema]
     table  = inData[:table]
     value_col = inData[:name ]
+    desc = inData[:description]
     unless  Catalog.entity_exists?(:schema,schema, nil) then
         Catalog.mkschema schema
     end
     unless Catalog.entity_exists?(:table, table, schema) then 
         Catalog.mk_lookup_table(table, schema, value_col)
     end
+    Catalog.table_comment(table, schema, desc)
 
     raw_data = inData[:values]
     raw_count = raw_data.length 
@@ -221,6 +261,15 @@ def lookup_type(inData)
     else
       "The data is not correct"
     end
+  end
+  def supports_type?(type) 
+    methods.map{|v| v =~ /#{type}_type/ }.compact.length == 1 
+  end
+end
+
+def connect(connection_url)
+    access = PostgresAccess::Parse.new(connection_url)
+    ActiveRecord::Base.establish_connection(access.connect)
 end
 def main()
     STDERR.puts @args.inspect if $DEBUG
@@ -229,19 +278,11 @@ def main()
     else
         connect(@args['-c'])
     end
-
-#      Catalog.connection.execute("create or replace view #{name} as #{query}")
-#    x = Depend.where("obj_schema not in ('pg_catalog', 'information_schema', 'pg_toast')").all
-    inData = YAML.load_file(@args['-i'])
-    puts inData
-    dbobj_type = inData[:type]
-    case dbobj_type
-    when 'lookup' then
-      puts lookup_type(inData)
-    when 'schema' then
-      puts schema_type(inData)
-    else
-      puts "Unsupported type #{dbobj_type}"
-    end
+    @args['<input_files>'].each {|infile| 
+      inData = YAML.load_file(infile)
+      puts inData
+      builder = DatabaseBuilder.new(inData)
+      puts builder.build()
+    }
 end
 main()
