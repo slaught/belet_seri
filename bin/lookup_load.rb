@@ -21,8 +21,8 @@ require 'postgres_access'
 $DEBUG = false
 
 @args = Getopt::Declare.new(<<EOF)
-         -c <connection_string>    connection string for access db 
-         -i <input_file>           input file name
+         -c <connection_string>    connection string for access db  [required]
+         -i <input_file>           input file name [required]
          -debug                    enable debugging 
                                       { $DEBUG = true }
 EOF
@@ -95,8 +95,13 @@ class Catalog < ActiveRecord::Base
       end
       rc.values.first.first.to_i > 0 #, rc['n'].inspect 
     end
-    def self.mkschema(name)
-        x(sq(["create schema ?", name]))
+    def self.schema_comment(name, desc)
+        n = connection.quote_table_name(name)
+        x(sq(["comment on schema #{n} is ?", desc]))
+    end
+    def self.mkschema(name) 
+        n = connection.quote_table_name(name)
+        x("create schema #{n}")
     end
     def self.mk_lookup_table(table_name, schema, value_col)
       x( %Q(create table "#{schema}"."#{table_name}" ) +
@@ -148,15 +153,15 @@ class LookupTable < ActiveRecord::Base
     when Array then
       build_record_array(data)
     when String then
-      build_single_record(data)
+      build_record_array([data])
     else
         raise Exception.new("unsupported build_record class #{data.class}")
     end
   end
-  def self.build_single_record(data)
-    z =safe_query(["?",data]) 
-     "(#{z})" 
-  end
+#  def self.build_single_record(data)
+#    z =safe_query(["?",data]) 
+#     "(#{z})" 
+#  end
   def self.build_record_array(data)
      z = data.map{|x| safe_query(["?",x]) }
      "(#{z.join(',')})" 
@@ -167,23 +172,26 @@ class LookupTable < ActiveRecord::Base
   end
   def self.mass_insert(key_list,raw_data)
     v = insert_values(raw_data)
-    execute "INSERT INTO #{connection.quote_table_name(table_name)} (#{key_list.join(',')}) #{v}"
+    c = key_columns(key_list)
+    t = connection.quote_table_name(table_name)
+    execute "INSERT INTO #{t} (#{c}) #{v}"
+  end
+  def self.key_colums(key_list)
+      key_list.map{|col| connection.quote_column_names(col)}.join(',')
   end
 end
-
-def main()
-    STDERR.puts @args.inspect if $DEBUG
-    if @args['-c'] == 'chad' then
-        connect(DESKTOP)
-    else
-        connect(@args['-c'])
+def schema_type(inData)
+    dbobj_type = inData[:type]
+    schema = inData[:schema]
+    desc = inData[:description]
+    unless  Catalog.entity_exists?(:schema,schema, nil) then
+        Catalog.mkschema schema
     end
-
-#      Catalog.connection.execute("create or replace view #{name} as #{query}")
-#    x = Depend.where("obj_schema not in ('pg_catalog', 'information_schema', 'pg_toast')").all
-
-    inData = YAML.load_file(@args['-i'])
-    puts inData
+    Catalog.schema_comment(schema, desc)
+    "Created Schema: #{schema}"
+end
+def lookup_type(inData)
+    dbobj_type = inData[:type]
     schema = inData[:schema]
     table  = inData[:table]
     value_col = inData[:name ]
@@ -196,17 +204,36 @@ def main()
     raw_data = inData[:values]
     
     LookupTable.table_name = "#{schema}.#{table}"
-#    x = Catalog.connection.execute("select count(*) from #{schema}.#{table}") 
-#    puts x.values.first.first.to_i
     cnt = LookupTable.count
     if cnt < 1 then
       LookupTable.mass_insert([value_col],raw_data)
-      puts "Inserted #{LookupTable.count} rows of #{raw_data.length}"
+      "Inserted #{LookupTable.count} rows of #{raw_data.length}"
     elsif cnt == raw_data.length
-      puts "The data looks correct"
+      "The data looks correct"
     else
-      puts "The data is not correct"
+      "The data is not correct"
     end
-    
+end
+def main()
+    STDERR.puts @args.inspect if $DEBUG
+    if @args['-c'] == 'chad' then
+        connect(DESKTOP)
+    else
+        connect(@args['-c'])
+    end
+
+#      Catalog.connection.execute("create or replace view #{name} as #{query}")
+#    x = Depend.where("obj_schema not in ('pg_catalog', 'information_schema', 'pg_toast')").all
+    inData = YAML.load_file(@args['-i'])
+    puts inData
+    dbobj_type = inData[:type]
+    case dbobj_type
+    when 'lookup' then
+      puts lookup_type(inData)
+    when 'schema' then
+      puts schema_type(inData)
+    else
+      puts "Unsupported type #{dbojb_type}"
+    end
 end
 main()
