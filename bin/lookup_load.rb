@@ -234,9 +234,8 @@ class DatabaseBuilder
     table  = inData[:table]
     value_col = inData[:name ]
     desc = inData[:description]
-    unless  Catalog.entity_exists?(:schema,schema, nil) then
-        Catalog.mkschema schema
-    end
+
+    create_schema(schema) 
     unless Catalog.entity_exists?(:table, table, schema) then 
         Catalog.mk_lookup_table(table, schema, value_col)
     end
@@ -248,11 +247,12 @@ class DatabaseBuilder
     LookupTable.table_name = "#{schema}.#{table}"
     cnt = LookupTable.count
     if cnt < 1 then
-      case
-      when Hash then
+      if raw_data.first.class == Hash then
+#        puts "Hash values lookup table #{raw_data.inspect}"
         LookupTable.mass_insert([value_col,'description'],
             raw_data.map{|h| [h[:value], h[:description]]})
       else
+#        puts "Array values lookup table: #{raw_data.inspect}"
         LookupTable.mass_insert([value_col],raw_data)
       end
       "Inserted #{LookupTable.count} rows of #{raw_count}"
