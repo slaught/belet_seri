@@ -4,3 +4,4 @@ gem 'getopt-declare'
 gem 'activerecord'
 gem 'pg'
 
+gem 'netrc'
