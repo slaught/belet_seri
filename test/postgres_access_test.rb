@@ -2,6 +2,8 @@ require 'postgres_access'
 
 require 'test/unit'
 
+require 'netrc'
+
 class PostgresAccessTest < Test::Unit::TestCase
 
   def setup()
@@ -17,6 +19,16 @@ class PostgresAccessTest < Test::Unit::TestCase
   end
   def teardown 
     ENV.replace(@backup)
+  end
+  def has_heroku?
+    x = %x(which heroku).strip
+    if File.exist?(x) then 
+      n = Netrc.read
+      n["machine"]
+
+    else
+      false
+    end
   end
   def pick_heroku_app
 # $ heroku apps
